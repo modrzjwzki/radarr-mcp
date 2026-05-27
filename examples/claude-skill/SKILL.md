@@ -89,4 +89,3 @@ Never delete without explicit user confirmation per-item or per-batch.
 - **Parallel tool calls when independent** (e.g., `get_quality_profiles` + `get_root_folders` together).
 - **Sequential when chained** (lookup → add → search → download).
 - For numeric IDs in conversation, prefer titles unless the user used the id.
-- Match the user's language: reply in the same language the user wrote in.
