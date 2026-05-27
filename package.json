@@ -1,0 +1,23 @@
+{
+  "name": "radarr-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing Radarr as tools for AI agents",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "radarr-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "zod": "^3.23.8"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
