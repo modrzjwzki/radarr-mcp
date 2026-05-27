@@ -42,6 +42,28 @@ const err = (message) => ({
   content: [{ type: "text", text: message }],
 });
 
+function parseTorrentTags(title) {
+  const t = title.toUpperCase();
+  const tags = [];
+  if (t.includes("REMUX")) tags.push("Remux");
+  if (t.includes("2160P") || t.includes("UHD") || t.includes("4K")) tags.push("4K");
+  else if (t.includes("1080P")) tags.push("1080p");
+  else if (t.includes("720P")) tags.push("720p");
+  if (t.includes("DOVI") || t.includes("DOV") || t.includes("DOLBY.VISION") || t.includes("DOLBYVISION") || /[.\-\s]DV[.\-\s]/.test(t)) tags.push("Dolby Vision");
+  if (t.includes("HDR10+")) tags.push("HDR10+");
+  else if (t.includes("HDR")) tags.push("HDR");
+  if (t.includes("ATMOS")) tags.push("Atmos");
+  else if (t.includes("TRUEHD")) tags.push("TrueHD");
+  else if (t.includes("DTS-HD") || t.includes("DTSHD")) tags.push("DTS-HD");
+  else if (t.includes("DTS")) tags.push("DTS");
+  if (t.includes("HEVC") || t.includes("X265") || t.includes("H.265") || t.includes("H265")) tags.push("HEVC");
+  else if (t.includes("X264") || t.includes("H.264") || t.includes("H264") || t.includes("AVC")) tags.push("AVC");
+  if (t.includes("PLDUB") || t.includes("PL.DUB")) tags.push("PL Dubbing");
+  else if (t.includes("PL.DUAL") || t.includes("PLDUAL") || t.includes("MULTI")) tags.push("PL + Oryginał");
+  else if (/[.\-]PL[.\-]/.test(t)) tags.push("PL");
+  return tags;
+}
+
 function createServer() {
   const server = new McpServer({
     name: "radarr-mcp",
@@ -50,10 +72,22 @@ function createServer() {
 
 server.tool(
   "list_movies",
-  "List all movies in the Radarr library with id, title, year, status, size, genres",
-  {},
-  async () => {
-    const movies = await radarr.getAllMovies();
+  "List all movies in the Radarr library. Optional filters: year, downloaded (has file), genres (comma-separated, case-insensitive).",
+  {
+    year: z.number().int().optional(),
+    downloaded: z.boolean().optional(),
+    genres: z.string().optional().describe("Comma-separated genres, e.g. 'Action,Drama'"),
+  },
+  async ({ year, downloaded, genres } = {}) => {
+    let movies = await radarr.getAllMovies();
+    if (year !== undefined) movies = movies.filter((m) => m.year === year);
+    if (downloaded !== undefined) movies = movies.filter((m) => m.hasFile === downloaded);
+    if (genres) {
+      const wanted = genres.split(",").map((g) => g.trim().toLowerCase());
+      movies = movies.filter((m) =>
+        (m.genres || []).some((g) => wanted.includes(g.toLowerCase()))
+      );
+    }
     return ok(movies.map(movieSummary));
   }
 );
@@ -150,17 +184,22 @@ server.tool(
   "Search available releases (torrents/nzb) for a movie. Returns list with guid, indexerId, quality, size, seeders.",
   { movieId: z.number().int() },
   async ({ movieId }) => {
-    const releases = await radarr.searchReleases(movieId);
+    let releases = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 5000));
+      releases = await radarr.searchReleases(movieId);
+      if (releases.length > 0) break;
+    }
     return ok(
       releases.map((r, i) => ({
-        index: i,
+        index: i + 1,
         guid: r.guid,
         indexerId: r.indexerId,
-        title: r.title,
+        indexer: r.indexer,
+        tags: parseTorrentTags(r.title),
         quality: r.quality?.quality?.name,
         sizeGb: toGb(r.size),
-        seeders: r.seeders,
-        leechers: r.leechers,
+        seeders: r.seeders ?? "?",
         protocol: r.protocol,
         rejected: r.rejected,
         rejections: r.rejections,
@@ -177,8 +216,13 @@ server.tool(
     indexerId: z.number().int(),
     movieId: z.number().int(),
   },
-  async ({ guid, indexerId, movieId }) =>
-    ok(await radarr.downloadRelease(guid, indexerId, movieId))
+  async ({ guid, indexerId, movieId }) => {
+    const [release, movie] = await Promise.all([
+      radarr.downloadRelease(guid, indexerId, movieId),
+      radarr.getMovie(movieId).catch(() => null),
+    ]);
+    return ok({ ...release, movieId, movieTitle: movie?.title ?? null });
+  }
 );
 
 server.tool(
@@ -247,6 +291,189 @@ server.tool(
       }))
     );
   }
+);
+
+server.tool(
+  "get_manual_import",
+  "Scan a completed download for importable files. Pass downloadId (from get_queue) OR folder path. Returns files with suggested movie matches, quality, and any rejections.",
+  {
+    downloadId: z.string().optional().describe("Download client ID from get_queue"),
+    folder: z.string().optional().describe("Absolute path to scan, e.g. /downloads/some-movie"),
+    filterExistingFiles: z.boolean().optional().default(true),
+  },
+  async ({ downloadId, folder, filterExistingFiles }) => {
+    const items = await radarr.getManualImport({ downloadId, folder, filterExistingFiles });
+    return ok(
+      (items || []).map((item) => ({
+        id: item.id,
+        path: item.path,
+        relativePath: item.relativePath,
+        sizeGb: toGb(item.size),
+        movie: item.movie ? { id: item.movie.id, title: item.movie.title, year: item.movie.year } : null,
+        quality: item.quality?.quality?.name,
+        languages: (item.languages || []).map((l) => l.name),
+        rejections: (item.rejections || []).map((r) => r.reason),
+      }))
+    );
+  }
+);
+
+server.tool(
+  "process_manual_import",
+  "Confirm and execute a manual import. Pass the array of items returned by get_manual_import (optionally override movieId/quality). Each item needs: id, path, movieId, qualityId.",
+  {
+    items: z.array(
+      z.object({
+        id: z.number().int(),
+        path: z.string(),
+        movieId: z.number().int(),
+        quality: z.object({ qualityId: z.number().int() }).optional(),
+        languages: z.array(z.object({ id: z.number().int() })).optional(),
+        downloadId: z.string().optional(),
+        importMode: z.enum(["move", "copy", "hardlink"]).optional().default("move"),
+      })
+    ).min(1),
+  },
+  async ({ items }) => ok(await radarr.processManualImport(items))
+);
+
+server.tool(
+  "get_health",
+  "Get Radarr health checks — shows warnings/errors for indexers, download client, disk space, etc.",
+  {},
+  async () => {
+    const checks = await radarr.getHealth();
+    return ok(
+      checks.map((c) => ({
+        source: c.source,
+        type: c.type,
+        message: c.message,
+        wikiUrl: c.wikiUrl,
+      }))
+    );
+  }
+);
+
+server.tool(
+  "get_movie_files",
+  "Get files on disk for a movie (codec, resolution, path, size). Useful before delete_movie_file.",
+  { movieId: z.number().int() },
+  async ({ movieId }) => {
+    const files = await radarr.getMovieFiles(movieId);
+    return ok(
+      (files || []).map((f) => ({
+        id: f.id,
+        movieId: f.movieId,
+        path: f.relativePath || f.path,
+        sizeGb: toGb(f.size),
+        quality: f.quality?.quality?.name,
+        codec: f.mediaInfo?.videoCodec,
+        resolution: f.mediaInfo?.resolution,
+        audioCodec: f.mediaInfo?.audioCodec,
+        audioChannels: f.mediaInfo?.audioChannels,
+      }))
+    );
+  }
+);
+
+server.tool(
+  "delete_movie_file",
+  "Delete a movie file from disk without removing the movie from Radarr library. Use get_movie_files to find the fileId.",
+  { fileId: z.number().int() },
+  async ({ fileId }) => ok(await radarr.deleteMovieFile(fileId))
+);
+
+server.tool(
+  "get_blocklist",
+  "Get blocked releases for a movie (releases Radarr won't re-download)",
+  { movieId: z.number().int() },
+  async ({ movieId }) => {
+    const items = await radarr.getBlocklist(movieId);
+    return ok(
+      (items || []).map((b) => ({
+        id: b.id,
+        sourceTitle: b.sourceTitle,
+        quality: b.quality?.quality?.name,
+        date: b.date,
+        indexer: b.indexer,
+        message: b.message,
+      }))
+    );
+  }
+);
+
+server.tool(
+  "get_credits",
+  "Get cast and crew for a movie (actor names, characters, directors, writers)",
+  { movieId: z.number().int() },
+  async ({ movieId }) => {
+    const credits = await radarr.getCredits(movieId);
+    const cast = (credits || []).filter((c) => c.type === "cast");
+    const crew = (credits || []).filter((c) => c.type === "crew");
+    return ok({
+      cast: cast
+        .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
+        .map((c) => ({ name: c.personName, character: c.character, order: c.order, tmdbId: c.personTmdbId })),
+      crew: crew.map((c) => ({ name: c.personName, job: c.job, department: c.department, tmdbId: c.personTmdbId })),
+    });
+  }
+);
+
+server.tool(
+  "get_calendar",
+  "Get upcoming movie releases scheduled in Radarr. Optionally filter by date range (ISO 8601).",
+  {
+    start: z.string().optional().describe("Start date, e.g. 2025-05-26"),
+    end: z.string().optional().describe("End date, e.g. 2025-06-26"),
+  },
+  async ({ start, end } = {}) => {
+    const movies = await radarr.getCalendar(start, end);
+    return ok(movies.map(movieSummary));
+  }
+);
+
+server.tool(
+  "get_wanted_cutoff",
+  "List movies that have a file but don't meet the quality cutoff (upgrade candidates)",
+  { pageSize: z.number().int().optional().default(50) },
+  async ({ pageSize }) => {
+    const result = await radarr.getWantedCutoff(pageSize);
+    return ok({
+      total: result.totalRecords,
+      records: (result.records || []).map(movieSummary),
+    });
+  }
+);
+
+server.tool(
+  "get_collections",
+  "Get movie collections (sagas/franchises) from Radarr. Optionally filter by TMDB collection id.",
+  { tmdbCollectionId: z.number().int().optional() },
+  async ({ tmdbCollectionId } = {}) => {
+    const collections = await radarr.getCollections(tmdbCollectionId);
+    return ok(
+      (collections || []).map((c) => ({
+        id: c.id,
+        title: c.title,
+        tmdbId: c.tmdbId,
+        overview: c.overview,
+        movies: (c.movies || []).map((m) => ({
+          tmdbId: m.tmdbId,
+          title: m.title,
+          year: m.year,
+          hasFile: m.hasFile,
+          isAvailable: m.isAvailable,
+        })),
+      }))
+    );
+  }
+);
+
+server.tool(
+  "refresh_movie",
+  "Force a metadata refresh for a movie (or all movies if no id given)",
+  { movieId: z.number().int().optional() },
+  async ({ movieId } = {}) => ok(await radarr.refreshMovie(movieId))
 );
 
 server.tool(
@@ -334,6 +561,17 @@ server.tool(
       topGenres,
     });
   }
+);
+
+server.tool(
+  "set_movie_tags",
+  "Set, add or remove tags on a movie. mode: 'set' replaces all tags, 'add' appends, 'remove' removes. Use get_tags to find tag ids.",
+  {
+    movieId: z.number().int(),
+    tags: z.array(z.number().int()).describe("Tag ids from get_tags"),
+    mode: z.enum(["set", "add", "remove"]).optional().default("set"),
+  },
+  async ({ movieId, tags, mode }) => ok(await radarr.setMovieTags(movieId, tags, mode))
 );
 
   return server;

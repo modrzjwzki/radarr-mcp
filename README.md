@@ -1,52 +1,82 @@
 # radarr-mcp
 
-MCP server that exposes [Radarr](https://radarr.video/) as tools for any MCP-compatible AI agent (Claude Desktop, Claude Code, Cursor, OpenClaw, Codex, etc.).
+MCP server exposing [Radarr](https://radarr.video/) as tools for any MCP-compatible AI client — Claude Desktop, Claude Code, Cursor, Codex, or your own agent.
 
-Two transports:
-- **stdio** (default) — for local clients like Claude Desktop / Claude Code / Cursor
-- **HTTP streamable** — for remote clients and in-network agents (e.g. `arr-agent` in docker-compose)
+Talk to your movie library in natural language: *"add Dune Part Two in 4K"*, *"what's downloading?"*, *"delete movies I haven't watched in a year"*. The AI picks the right tools, chains them, and reports back.
 
-Switch via `MCP_TRANSPORT=stdio|http` (default `stdio`).
+## Features
+
+- **34 tools** covering library, search, queue, releases, files, calendar, health, and stats
+- **Two transports**: stdio (default — local AI clients) and HTTP streamable (remote agents, docker-compose)
+- **Stateless HTTP** — a fresh server instance per request, safe for concurrent calls
+- **No magic defaults** — root folders, quality profiles, tags are all looked up via dedicated tools, never hardcoded
 
 ## Tools
 
+### Library
 | Tool | Purpose |
 | --- | --- |
 | `list_movies` | All movies in the library |
 | `search_library` | Find movies by title fragment |
 | `get_movie` | Full details for one movie |
-| `lookup_movie` | TMDB lookup (not yet added) |
-| `add_movie` | Add a movie by TMDB id |
+| `lookup_movie` | TMDB lookup (before adding) |
+| `add_movie` | Add by TMDB id |
 | `delete_movie` | Remove movie (optionally with files) |
+| `refresh_movie` | Refresh metadata from TMDB |
 | `set_monitored` | Toggle monitoring |
 | `change_quality` | Change quality profile |
+| `set_movie_tags` | Replace tags on a movie |
+| `get_movie_files` | List physical files for a movie |
+| `delete_movie_file` | Delete a specific file |
+
+### Search & download
+| Tool | Purpose |
+| --- | --- |
 | `trigger_search` | Force indexer search |
-| `search_releases` | List available releases |
+| `search_releases` | List available releases with built-in retry |
 | `download_release` | Send release to download client |
 | `get_queue` | Current download queue |
 | `cancel_queue_item` | Remove from queue |
-| `get_movie_history` | History entries for a movie |
+| `get_manual_import` | Inspect files awaiting manual import |
+| `process_manual_import` | Approve / commit a manual import |
+| `get_blocklist` | Blocked releases |
+
+### Insights
+| Tool | Purpose |
+| --- | --- |
+| `get_movie_history` | History for a movie |
 | `get_missing_movies` | Monitored movies without files |
 | `get_duplicates` | Movies with multiple file copies |
+| `get_wanted_cutoff` | Movies below quality cutoff |
+| `get_calendar` | Upcoming theatrical / digital releases |
+| `get_credits` | Cast & crew for a movie |
+| `get_collections` | TMDB collections |
+| `get_collection_stats` | Aggregate library stats |
+| `get_health` | Radarr health issues |
+
+### System
+| Tool | Purpose |
+| --- | --- |
 | `get_quality_profiles` | List quality profiles |
-| `get_root_folders` | List root folders + free space |
+| `get_root_folders` | Root folders + free space |
 | `get_tags` | List tags |
 | `get_disk_space` | Disk space per volume |
 | `get_system_status` | Radarr system info |
-| `get_collection_stats` | Aggregate library stats |
 
 ## Setup
 
 ```bash
+git clone https://github.com/<your-handle>/radarr-mcp
+cd radarr-mcp
 npm install
-cp .env.example .env
-# fill in RADARR_URL and RADARR_API_KEY
-npm start
+RADARR_URL=http://localhost:7878 RADARR_API_KEY=your-key npm start
 ```
 
-## Use with Claude Desktop
+Get your API key from Radarr → Settings → General → Security.
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+## Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
@@ -63,13 +93,20 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-## Use with Claude Code
+Restart Claude Desktop. The `radarr` server should appear in the tools menu.
+
+## Claude Code
 
 ```bash
-claude mcp add radarr -e RADARR_URL=http://localhost:7878 -e RADARR_API_KEY=your-key -- node /absolute/path/to/radarr-mcp/src/index.js
+claude mcp add radarr \
+  -e RADARR_URL=http://localhost:7878 \
+  -e RADARR_API_KEY=your-key \
+  -- node /absolute/path/to/radarr-mcp/src/index.js
 ```
 
 ## HTTP mode
+
+For remote agents, docker-compose, or claude.ai remote MCPs:
 
 ```bash
 MCP_TRANSPORT=http MCP_PORT=3000 \
@@ -78,7 +115,7 @@ MCP_TRANSPORT=http MCP_PORT=3000 \
   npm start
 ```
 
-Verify handshake:
+Verify the handshake:
 
 ```bash
 curl -X POST http://localhost:3000/mcp \
@@ -89,7 +126,7 @@ curl -X POST http://localhost:3000/mcp \
 
 ## Docker
 
-Dockerfile defaults to HTTP mode on port 3000.
+The included `Dockerfile` runs HTTP mode on port 3000:
 
 ```bash
 docker build -t radarr-mcp .
@@ -99,9 +136,43 @@ docker run --rm -p 3000:3000 \
   radarr-mcp
 ```
 
-## Remote access (e.g. claude.ai)
+Or compose:
 
-Run in HTTP mode behind a reverse proxy / Cloudflare Tunnel and register the public HTTPS endpoint as a remote MCP in claude.ai.
+```yaml
+services:
+  radarr-mcp:
+    build: ./radarr-mcp
+    environment:
+      RADARR_URL: http://radarr:7878
+      RADARR_API_KEY: ${RADARR_API_KEY}
+    ports:
+      - "3000:3000"
+```
+
+## Remote access via claude.ai
+
+Run HTTP mode behind a reverse proxy (nginx, Caddy) or Cloudflare Tunnel, then register the public HTTPS endpoint as a remote MCP in claude.ai → Settings → Connectors.
+
+## Configuration
+
+| Env var | Required | Default | Description |
+| --- | --- | --- | --- |
+| `RADARR_URL` | yes | — | Base URL of your Radarr instance |
+| `RADARR_API_KEY` | yes | — | Radarr API key |
+| `MCP_TRANSPORT` | no | `stdio` | `stdio` or `http` |
+| `MCP_PORT` | no | `3000` | HTTP port (only when transport=http) |
+
+## Project layout
+
+```
+src/
+  radarr.js   ← thin Radarr v3 REST client, no MCP concerns
+  index.js    ← MCP server bootstrap, tool registration, transport selection
+Dockerfile
+package.json
+```
+
+Adding a tool: extend `RadarrClient` in `radarr.js`, then register it inside `createServer()` in `index.js`.
 
 ## License
 

@@ -161,11 +161,81 @@ export class RadarrClient {
     return Object.values(groups).filter((g) => g.length > 1);
   }
 
+  async getManualImport({ downloadId, folder, filterExistingFiles = true } = {}) {
+    const params = new URLSearchParams({ filterExistingFiles });
+    if (downloadId) params.set("downloadId", downloadId);
+    if (folder) params.set("folder", folder);
+    return this._fetch(`/manualimport?${params}`);
+  }
+
+  async processManualImport(items) {
+    return this._fetch("/manualimport", {
+      method: "POST",
+      body: JSON.stringify(items),
+    });
+  }
+
+  async getHealth() {
+    return this._fetch("/health");
+  }
+
+  async getMovieFiles(movieId) {
+    return this._fetch(`/moviefile?movieId=${movieId}`);
+  }
+
+  async deleteMovieFile(fileId) {
+    await this._fetch(`/moviefile/${fileId}`, { method: "DELETE" });
+    return { deleted: true, fileId };
+  }
+
+  async getBlocklist(movieId) {
+    return this._fetch(`/blocklist/movie?movieId=${movieId}`);
+  }
+
+  async getCredits(movieId) {
+    return this._fetch(`/credit?movieId=${movieId}`);
+  }
+
+  async getCalendar(start, end) {
+    let path = "/calendar";
+    const params = [];
+    if (start) params.push(`start=${encodeURIComponent(start)}`);
+    if (end) params.push(`end=${encodeURIComponent(end)}`);
+    if (params.length) path += `?${params.join("&")}`;
+    return this._fetch(path);
+  }
+
+  async getWantedCutoff(pageSize = 50) {
+    return this._fetch(`/wanted/cutoff?pageSize=${pageSize}&sortKey=title&sortDirection=ascending`);
+  }
+
+  async getCollections(tmdbCollectionId) {
+    const path = tmdbCollectionId
+      ? `/collection?tmdbId=${tmdbCollectionId}`
+      : "/collection";
+    return this._fetch(path);
+  }
+
+  async refreshMovie(movieId) {
+    const body = movieId
+      ? { name: "RefreshMovie", movieIds: [movieId] }
+      : { name: "RefreshMovie" };
+    return this._fetch("/command", { method: "POST", body: JSON.stringify(body) });
+  }
+
   async getDiskSpace() {
     return this._fetch("/diskspace");
   }
 
   async getSystemStatus() {
     return this._fetch("/system/status");
+  }
+
+  async setMovieTags(movieId, tags, mode = "set") {
+    const movie = await this.getMovie(movieId);
+    if (mode === "set") movie.tags = tags;
+    else if (mode === "add") movie.tags = [...new Set([...(movie.tags || []), ...tags])];
+    else if (mode === "remove") movie.tags = (movie.tags || []).filter((t) => !tags.includes(t));
+    return this.updateMovie(movie);
   }
 }
