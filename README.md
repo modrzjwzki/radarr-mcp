@@ -153,6 +153,10 @@ services:
 
 Run HTTP mode behind a reverse proxy (nginx, Caddy) or Cloudflare Tunnel, then register the public HTTPS endpoint as a remote MCP in claude.ai → Settings → Connectors.
 
+## Claude Skill (optional)
+
+A ready-to-use [Claude Skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills) lives in [`examples/claude-skill/`](./examples/claude-skill/). It teaches Claude how to chain these tools into clean add-movie / search / download / cleanup flows. Drop it into `~/.claude/skills/media-library/` and Claude Code picks it up automatically.
+
 ## Configuration
 
 | Env var | Required | Default | Description |
